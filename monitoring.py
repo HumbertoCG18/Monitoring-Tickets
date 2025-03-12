@@ -1,163 +1,168 @@
+import tkinter as tk
+from tkinter import ttk
 import time
-import requests
-import logging
-import os
-from datetime import datetime
-import pytz
-import json
-import smtplib
-from email.mime.text import MIMEText
-import signal
-import sys
+import math
+from concurrent.futures import ThreadPoolExecutor
+from selenium import webdriver
+from selenium.webdriver.chrome.options import Options
 
-def configurar_logger():
-    if not os.path.exists('Logs'):
-        os.makedirs('Logs')
-    logging.basicConfig(
-        filename='Logs/monitoramento.log',
-        level=logging.INFO,
-        format='%(asctime)s - %(levelname)s - %(message)s'
-    )
+# Variáveis globais para armazenar os drivers e os tempos iniciais de carregamento
+drivers = []
+initial_navstart = {}
+stop_monitor = False  # Flag para parar o monitoramento
 
-def menu_principal():
-    print("===== Configuração do Monitor de Ingressos =====")
-    email = input("Insira seu email para notificações: ")
-    evento = input("Insira o nome do artista ou evento a ser monitorado: ")
-    intervalo_input = input("Intervalo de verificação em segundos (padrão 300): ") or 300
+def open_session(i, url, auto_arrange, window_width, window_height, cols):
+    """Abre uma sessão do Chrome e retorna o driver e o timestamp de navegação."""
+    chrome_options = Options()
+    # Estratégias para reduzir a detecção de automação (para minimizar o captcha)
+    chrome_options.add_experimental_option("excludeSwitches", ["enable-automation"])
+    chrome_options.add_experimental_option("useAutomationExtension", False)
+    chrome_options.add_argument("--disable-blink-features=AutomationControlled")
+    
+    if auto_arrange:
+        row = i // cols
+        col = i % cols
+        x = col * window_width
+        y = row * window_height
+        chrome_options.add_argument(f"--window-size={window_width},{window_height}")
+        chrome_options.add_argument(f"--window-position={x},{y}")
+    
+    driver = webdriver.Chrome(options=chrome_options)
+    driver.get(url)
     try:
-        intervalo_atualizacao = int(intervalo_input)
-        if intervalo_atualizacao <= 0:
-            raise ValueError
-    except ValueError:
-        print("Intervalo inválido. Usando o valor padrão de 300 segundos.")
-        intervalo_atualizacao = 300
-    return {
-        'email': email,
-        'evento': evento,
-        'intervalo_atualizacao': intervalo_atualizacao
-    }
+        nav_start = driver.execute_script("return window.performance.timing.navigationStart")
+    except Exception:
+        nav_start = None
+    return driver, nav_start
 
-def converter_data_para_brasilia(data_iso):
-    tz = pytz.timezone('America/Sao_Paulo')
-    data_utc = datetime.strptime(data_iso, "%Y-%m-%dT%H:%M:%SZ")
-    data_local = data_utc.astimezone(tz)
-    return data_local.strftime("%d/%m/%Y %H:%M:%S")
+def launch_sessions(url, num_sessions, auto_arrange, auto_close):
+    global drivers, initial_navstart, stop_monitor
+    stop_monitor = False
+    drivers.clear()
+    initial_navstart.clear()
+    
+    screen_width = root.winfo_screenwidth()
+    screen_height = root.winfo_screenheight()
+    
+    if auto_arrange:
+        rows = math.ceil(math.sqrt(num_sessions))
+        cols = math.ceil(num_sessions / rows)
+        window_width = int(screen_width / cols)
+        window_height = int(screen_height / rows)
+    else:
+        window_width = window_height = cols = None
+    
+    # Abre as sessões em paralelo para acelerar o processo
+    with ThreadPoolExecutor(max_workers=num_sessions) as executor:
+        futures = []
+        for i in range(num_sessions):
+            futures.append(executor.submit(open_session, i, url, auto_arrange, window_width, window_height, cols if cols else 0))
+        for future in futures:
+            try:
+                driver, nav_start = future.result()
+                drivers.append(driver)
+                initial_navstart[driver] = nav_start
+            except Exception as e:
+                print("Erro ao abrir uma sessão:", e)
+    
+    if auto_close:
+        root.after(1000, monitor_refresh)
 
-def verificar_disponibilidade(evento):
-    base_url = "https://app.ticketmaster.com/discovery/v2/events.json"
-    api_key = os.getenv("TICKETMASTER_API_KEY")
-    params = {
-        'keyword': evento,
-        'countryCode': 'BR',
-        'apikey': api_key
-    }
-    try:
-        response = requests.get(base_url, params=params)
-        response.raise_for_status()
-    except requests.exceptions.RequestException as e:
-        logging.error(f"Erro ao acessar a API do Ticketmaster: {e}")
-        print(f"Erro ao acessar a API do Ticketmaster: {e}")
-        return None
-    try:
-        data = response.json()
-    except json.JSONDecodeError as e:
-        logging.error(f"Erro ao decodificar JSON: {e}")
-        print(f"Erro ao decodificar JSON: {e}")
-        return None
-    try:
-        events = data.get('_embedded', {}).get('events', [])
-        if not events:
-            logging.info("Nenhum evento encontrado.")
-            return None
-        for event in events:
-            if event['name'].lower() == evento.lower():
-                event_name = event['name']
-                event_date = event['dates']['start']['dateTime']
-                venue = event['_embedded']['venues'][0]['name']
-                city = event['_embedded']['venues'][0]['city']['name']
-                country = event['_embedded']['venues'][0]['country']['name']
-                url = event['url']
-                status = event['dates']['status']['code']
-                esgotado = status != 'onsale'
-                event_date_str = converter_data_para_brasilia(event_date)
-                return {
-                    'nome_evento': event_name,
-                    'data_evento': event_date_str,
-                    'local': f"{venue}, {city}, {country}",
-                    'esgotado': esgotado,
-                    'url': url
-                }
-        logging.info("Evento específico não encontrado.")
-        return None
-    except Exception as e:
-        logging.error(f"Erro ao processar os dados da API: {e}")
-        print(f"Erro ao processar os dados da API: {e}")
-        return None
-
-def enviar_notificacao_email(config, info_evento):
-    try:
-        msg = MIMEText(f"Ingressos disponíveis para {info_evento['nome_evento']} em {info_evento['data_evento']}!\nLink: {info_evento['url']}")
-        msg['Subject'] = 'Ingressos Disponíveis!'
-        msg['From'] = 'seu_email@example.com'
-        msg['To'] = config['email']
-        smtp_server = 'smtp.gmail.com'
-        smtp_port = 587
-        smtp_user = 'seu_email@example.com'
-        smtp_password = 'sua_senha'
-        with smtplib.SMTP(smtp_server, smtp_port) as server:
-            server.starttls()
-            server.login(smtp_user, smtp_password)
-            server.send_message(msg)
-        logging.info("Email de notificação enviado com sucesso.")
-        print("Email de notificação enviado com sucesso.")
-    except Exception as e:
-        logging.error(f"Falha ao enviar email: {e}")
-        print(f"Falha ao enviar email: {e}")
-
-def monitorar_ingressos(config):
-    ingressos_disponiveis_anteriormente = False
-    logging.info("Iniciando monitoramento...")
-    print("\nIniciando monitoramento...")
-    while True:
+def monitor_refresh():
+    """Monitora as janelas e fecha as que foram recarregadas. Se todas as janelas forem fechadas manualmente, encerra a GUI."""
+    global drivers, initial_navstart, stop_monitor
+    if stop_monitor:
+        return
+    
+    # Verifica se alguma janela foi fechada manualmente e remove o driver correspondente
+    for driver in drivers.copy():
         try:
-            logging.info("Verificando disponibilidade para o evento...")
-            print("\nVerificando disponibilidade para o evento...")
-            info_evento = verificar_disponibilidade(config['evento'])
-            if info_evento:
-                print(f"Evento: {info_evento['nome_evento']}")
-                print(f"Data do Evento: {info_evento['data_evento']}")
-                print(f"Local: {info_evento['local']}")
-                esgotado = "Sim" if info_evento['esgotado'] else "Não"
-                print(f"Ingressos esgotados: {esgotado}")
-                print(f"Link para compra: {info_evento['url']}")
-                if not info_evento['esgotado']:
-                    if not ingressos_disponiveis_anteriormente:
-                        logging.info("Ingressos disponíveis! Enviando notificações.")
-                        print("\nIngressos disponíveis! Você pode prosseguir com a compra.")
-                        enviar_notificacao_email(config, info_evento)
-                        ingressos_disponiveis_anteriormente = True
-                    else:
-                        logging.info("Ingressos ainda disponíveis.")
-                else:
-                    logging.info("Ingressos esgotados no momento.")
-                    print("\nOs ingressos estão esgotados no momento.")
-                    ingressos_disponiveis_anteriormente = False
-            else:
-                logging.info("Evento não encontrado ou informações indisponíveis.")
-                print("Evento não encontrado ou informações indisponíveis.")
-        except Exception as e:
-            logging.error(f"Erro inesperado: {e}")
-            print(f"Erro inesperado: {e}")
-            print("Tentando novamente em alguns segundos...")
-        time.sleep(config['intervalo_atualizacao'])
+            _ = driver.title
+        except Exception:
+            drivers.remove(driver)
+    
+    if not drivers:
+        stop_monitor = True
+        root.quit()  # Encerra a GUI se não houver mais janelas abertas
+        return
 
-def signal_handler(sig, frame):
-    print('\nEncerrando o monitoramento...')
-    logging.info("Monitoramento encerrado pelo usuário.")
-    sys.exit(0)
+    for driver in drivers.copy():
+        try:
+            current_navstart = driver.execute_script("return window.performance.timing.navigationStart")
+        except Exception:
+            drivers.remove(driver)
+            continue
+        if initial_navstart.get(driver) is not None and current_navstart != initial_navstart[driver]:
+            # Se a página foi recarregada, fecha todas as janelas, exceto a atual
+            for d in drivers.copy():
+                if d != driver:
+                    try:
+                        d.quit()
+                    except Exception:
+                        pass
+                    drivers.remove(d)
+            initial_navstart[driver] = current_navstart
+            break
+    
+    root.after(1000, monitor_refresh)
 
-if __name__ == "__main__":
-    signal.signal(signal.SIGINT, signal_handler)
-    configurar_logger()
-    configuracao = menu_principal()
-    monitorar_ingressos(configuracao)
+def start_button_clicked():
+    """Função chamada quando o botão 'Iniciar' é pressionado."""
+    url = url_entry.get()
+    try:
+        num_sessions = int(sessions_entry.get())
+    except ValueError:
+        print("Número de sessões inválido!")
+        return
+    auto_arrange = auto_arrange_var.get()
+    auto_close = auto_close_var.get()
+    launch_sessions(url, num_sessions, auto_arrange, auto_close)
+
+def on_closing():
+    """Encerra todas as instâncias do Chrome e finaliza a aplicação."""
+    global stop_monitor
+    stop_monitor = True
+    for driver in drivers.copy():
+        try:
+            driver.quit()
+        except Exception:
+            pass
+    root.destroy()
+
+def on_alt_f4(event):
+    """Captura o atalho ALT+F4 para fechar a aplicação."""
+    on_closing()
+
+# --- Criação da GUI com Tkinter ---
+root = tk.Tk()
+root.title("Testador de Sessões - Chrome")
+root.geometry("400x250")
+
+# Vincula o atalho ALT+F4 à função de fechamento
+root.bind_all("<Alt-F4>", on_alt_f4)
+
+style = ttk.Style(root)
+style.theme_use('clam')
+
+tk.Label(root, text="URL do site:").pack(pady=5)
+url_entry = tk.Entry(root, width=50)
+url_entry.pack(padx=10)
+
+tk.Label(root, text="Número de sessões:").pack(pady=5)
+sessions_entry = tk.Entry(root, width=10)
+sessions_entry.pack(padx=10)
+
+auto_arrange_var = tk.BooleanVar()
+auto_close_var = tk.BooleanVar()
+
+cb1 = tk.Checkbutton(root, text="Auto-arranjar janelas (window manager)", variable=auto_arrange_var)
+cb1.pack(anchor="w", padx=10, pady=5)
+
+cb2 = tk.Checkbutton(root, text="Fechar janelas ao recarregar", variable=auto_close_var)
+cb2.pack(anchor="w", padx=10)
+
+start_button = tk.Button(root, text="Iniciar", command=start_button_clicked)
+start_button.pack(pady=15)
+
+root.protocol("WM_DELETE_WINDOW", on_closing)
+root.mainloop()
