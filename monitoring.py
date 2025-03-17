@@ -1,6 +1,6 @@
 import tkinter as tk
 from tkinter import ttk
-import time
+import threading
 import math
 from concurrent.futures import ThreadPoolExecutor
 from selenium import webdriver
@@ -8,161 +8,157 @@ from selenium.webdriver.chrome.options import Options
 
 # Variáveis globais para armazenar os drivers e os tempos iniciais de carregamento
 drivers = []
-initial_navstart = {}
-stop_monitor = False  # Flag para parar o monitoramento
+stop_monitor = False
 
-def open_session(i, url, auto_arrange, window_width, window_height, cols):
-    """Abre uma sessão do Chrome e retorna o driver e o timestamp de navegação."""
+# Obtenha resolução das telas (ajuste conforme seus monitores)
+MONITOR_PRINCIPAL = {'width': 1920, 'height': 1080, 'x_offset': 0, 'y_offset': 0}
+MONITOR_VERTICAL = {'width': 1080, 'height': 1920, 'x_offset': 1920, 'y_offset': 0}
+
+
+def open_session(url, position, incognito):
     chrome_options = Options()
-    # Estratégias para reduzir a detecção de automação (para minimizar o captcha)
-    chrome_options.add_experimental_option("excludeSwitches", ["enable-automation"])
-    chrome_options.add_experimental_option("useAutomationExtension", False)
-    chrome_options.add_argument("--disable-blink-features=AutomationControlled")
-    
-    if auto_arrange:
-        row = i // cols
-        col = i % cols
-        x = col * window_width
-        y = row * window_height
-        chrome_options.add_argument(f"--window-size={window_width},{window_height}")
-        chrome_options.add_argument(f"--window-position={x},{y}")
-    
+    chrome_options.add_argument(f"--window-size={position[0]},{position[1]}")
+    chrome_options.add_argument(f"--window-position={position[2]},{position[3]}")
+    chrome_options.add_argument('--disable-blink-features=AutomationControlled')
+    chrome_options.add_experimental_option('excludeSwitches', ['enable-automation'])
+    if incognito:
+        chrome_options.add_argument('--incognito')
+
     driver = webdriver.Chrome(options=chrome_options)
     driver.get(url)
-    try:
-        nav_start = driver.execute_script("return window.performance.timing.navigationStart")
-    except Exception:
-        nav_start = None
-    return driver, nav_start
+    return driver
 
-def launch_sessions(url, num_sessions, auto_arrange, auto_close):
-    global drivers, initial_navstart, stop_monitor
+
+def launch_sessions(url, num_sessions, auto_close, incognito):
+    global drivers, stop_monitor
     stop_monitor = False
+
     drivers.clear()
-    initial_navstart.clear()
-    
-    screen_width = root.winfo_screenwidth()
-    screen_height = root.winfo_screenheight()
-    
-    if auto_arrange:
-        rows = math.ceil(math.sqrt(num_sessions))
-        cols = math.ceil(num_sessions / rows)
-        window_width = int(screen_width / cols)
-        window_height = int(screen_height / rows)
-    else:
-        window_width = window_height = cols = None
-    
-    # Abre as sessões em paralelo para acelerar o processo
+    positions = []
+
+    for i in range(num_sessions):
+        if i < 9:
+            cols = 3
+            width = MONITOR_PRINCIPAL['width'] // 3
+            height = MONITOR_PRINCIPAL['height'] // 3
+            x = MONITOR_PRINCIPAL['x_offset'] + (i % cols) * width
+            y = MONITOR_PRINCIPAL['y_offset'] + (i // cols) * height
+        else:
+            width = MONITOR_VERTICAL['width']
+            height = MONITOR_VERTICAL['height'] // (num_sessions - 9)
+            x = MONITOR_VERTICAL['x_offset']
+            y = MONITOR_VERTICAL['y_offset'] + (i - 9) * height
+        positions.append((width, height, x, y))
+
     with ThreadPoolExecutor(max_workers=num_sessions) as executor:
-        futures = []
-        for i in range(num_sessions):
-            futures.append(executor.submit(open_session, i, url, auto_arrange, window_width, window_height, cols if cols else 0))
-        for future in futures:
-            try:
-                driver, nav_start = future.result()
-                drivers.append(driver)
-                initial_navstart[driver] = nav_start
-            except Exception as e:
-                print("Erro ao abrir uma sessão:", e)
-    
+        drivers.extend(executor.map(lambda pos: open_session(url, pos, incognito), positions))
+
     if auto_close:
         root.after(1000, monitor_refresh)
 
+
 def monitor_refresh():
-    """Monitora as janelas e fecha as que foram recarregadas. Se todas as janelas forem fechadas manualmente, encerra a GUI."""
-    global drivers, initial_navstart, stop_monitor
+    global stop_monitor
     if stop_monitor:
         return
-    
-    # Verifica se alguma janela foi fechada manualmente e remove o driver correspondente
-    for driver in drivers.copy():
+
+    active_drivers = []
+    for driver in drivers:
         try:
-            _ = driver.title
-        except Exception:
-            drivers.remove(driver)
-    
-    if not drivers:
-        stop_monitor = True
-        root.quit()  # Encerra a GUI se não houver mais janelas abertas
+            driver.title
+            active_drivers.append(driver)
+        except:
+            continue
+
+    if not active_drivers:
+        root.quit()
         return
 
-    for driver in drivers.copy():
-        try:
-            current_navstart = driver.execute_script("return window.performance.timing.navigationStart")
-        except Exception:
-            drivers.remove(driver)
-            continue
-        if initial_navstart.get(driver) is not None and current_navstart != initial_navstart[driver]:
-            # Se a página foi recarregada, fecha todas as janelas, exceto a atual
-            for d in drivers.copy():
-                if d != driver:
-                    try:
-                        d.quit()
-                    except Exception:
-                        pass
-                    drivers.remove(d)
-            initial_navstart[driver] = current_navstart
-            break
-    
     root.after(1000, monitor_refresh)
 
-def start_button_clicked():
-    """Função chamada quando o botão 'Iniciar' é pressionado."""
-    url = url_entry.get()
-    try:
-        num_sessions = int(sessions_entry.get())
-    except ValueError:
-        print("Número de sessões inválido!")
-        return
-    auto_arrange = auto_arrange_var.get()
-    auto_close = auto_close_var.get()
-    launch_sessions(url, num_sessions, auto_arrange, auto_close)
 
-def on_closing():
-    """Encerra todas as instâncias do Chrome e finaliza a aplicação."""
+def draw_grid(canvas, num_sessions, width, height):
+    canvas.delete("all")
+    if num_sessions <= 9:
+        rows = cols = math.ceil(math.sqrt(num_sessions))
+        cell_width = width / cols
+        cell_height = height / rows
+        for i in range(num_sessions):
+            row = i // cols
+            col = i % cols
+            x0 = col * cell_width
+            y0 = row * cell_height
+            x1 = x0 + cell_width
+            y1 = y0 + cell_height
+            canvas.create_rectangle(x0, y0, x1, y1, outline="black", fill="lightgrey")
+    else:
+        for monitor, sessions in [("Monitor 1", 9), ("Monitor 2", num_sessions - 9)]:
+            rows = cols = math.ceil(math.sqrt(sessions))
+            cell_width = width / cols
+            cell_height = height / rows
+            y_offset = 0 if monitor == "Monitor 1" else height + 10
+            canvas.create_text(width / 2, y_offset - 10, text=monitor)
+            for i in range(sessions):
+                row = i // cols
+                col = i % cols
+                x0 = col * cell_width
+                y0 = y_offset + row * cell_height
+                x1 = x0 + cell_width
+                y1 = y0 + cell_height
+                canvas.create_rectangle(x0, y0, x1, y1, outline="black", fill="lightgrey")
+
+
+def update_preview(event=None):
+    try:
+        num_sessions = int(num_entry.get())
+        draw_grid(preview_canvas, num_sessions, 350, 150)
+    except:
+        pass
+
+
+def start():
+    url = url_entry.get()
+    num = int(num_entry.get())
+    auto_close = auto_close_var.get()
+    incognito = incognito_var.get()
+    launch_sessions(url, num, auto_close, incognito)
+
+
+def close_all():
     global stop_monitor
     stop_monitor = True
-    for driver in drivers.copy():
-        try:
-            driver.quit()
-        except Exception:
-            pass
+    threading.Thread(target=lambda: [driver.quit() for driver in drivers], daemon=True).start()
     root.destroy()
 
-def on_alt_f4(event):
-    """Captura o atalho ALT+F4 para fechar a aplicação."""
-    on_closing()
 
-# --- Criação da GUI com Tkinter ---
 root = tk.Tk()
-root.title("Testador de Sessões - Chrome")
-root.geometry("400x250")
-
-# Vincula o atalho ALT+F4 à função de fechamento
-root.bind_all("<Alt-F4>", on_alt_f4)
+root.geometry('400x450')
+root.title('Multi Chrome Tester')
 
 style = ttk.Style(root)
 style.theme_use('clam')
 
-tk.Label(root, text="URL do site:").pack(pady=5)
+tk.Label(root, text='URL:').pack()
 url_entry = tk.Entry(root, width=50)
-url_entry.pack(padx=10)
+url_entry.pack()
 
-tk.Label(root, text="Número de sessões:").pack(pady=5)
-sessions_entry = tk.Entry(root, width=10)
-sessions_entry.pack(padx=10)
+tk.Label(root, text='Sessões:').pack()
+num_entry = tk.Entry(root)
+num_entry.pack()
+num_entry.bind('<KeyRelease>', update_preview)
 
-auto_arrange_var = tk.BooleanVar()
 auto_close_var = tk.BooleanVar()
+incognito_var = tk.BooleanVar()
 
-cb1 = tk.Checkbutton(root, text="Auto-arranjar janelas (window manager)", variable=auto_arrange_var)
-cb1.pack(anchor="w", padx=10, pady=5)
+tk.Checkbutton(root, text='Fechar ao recarregar', variable=auto_close_var).pack()
+tk.Checkbutton(root, text='Modo anônimo', variable=incognito_var).pack()
 
-cb2 = tk.Checkbutton(root, text="Fechar janelas ao recarregar", variable=auto_close_var)
-cb2.pack(anchor="w", padx=10)
+preview_canvas = tk.Canvas(root, width=350, height=320)
+preview_canvas.pack(pady=10)
 
-start_button = tk.Button(root, text="Iniciar", command=start_button_clicked)
-start_button.pack(pady=15)
+tk.Button(root, text='Iniciar', command=start).pack(pady=10)
 
-root.protocol("WM_DELETE_WINDOW", on_closing)
+root.protocol("WM_DELETE_WINDOW", close_all)
+root.bind_all('<Alt-F4>', lambda event: close_all())
+
 root.mainloop()
