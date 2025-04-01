@@ -2,7 +2,6 @@ import os
 import sys
 import subprocess
 import importlib
-import pkg_resources
 
 def print_colored(text, color):
     """Imprime texto colorido no console"""
@@ -25,6 +24,29 @@ def check_python_version():
         return False
     return True
 
+def is_package_installed(package_name):
+    """Verifica se um pacote está instalado"""
+    try:
+        importlib.import_module(package_name)
+        return True
+    except ImportError:
+        return False
+
+def get_package_version(package_name):
+    """Obtém a versão de um pacote instalado"""
+    try:
+        return importlib.import_module(package_name).__version__
+    except (ImportError, AttributeError):
+        try:
+            # Tenta obter versão usando pip
+            result = subprocess.check_output([sys.executable, '-m', 'pip', 'show', package_name])
+            for line in result.decode('utf-8').split('\n'):
+                if line.startswith('Version:'):
+                    return line.split(':')[1].strip()
+        except:
+            pass
+    return "Desconhecida"
+
 def install_package(package_name):
     """Instala um pacote usando pip"""
     print_colored(f"Instalando {package_name}...", "yellow")
@@ -43,7 +65,7 @@ def check_and_install():
         ("selenium", "selenium"),
         ("webdriver_manager", "webdriver-manager"),
         ("screeninfo", "screeninfo"),
-        ("tkinter", "tk")  # tkinter geralmente já vem com Python, mas verificamos por precaução
+        ("tkinter", "")  # tkinter geralmente já vem com Python, não precisa instalar via pip
     ]
 
     # Verificar instalação pip
@@ -59,25 +81,30 @@ def check_and_install():
 
     # Verificar e instalar cada dependência
     all_installed = True
-    installed_packages = {pkg.key: pkg.version for pkg in pkg_resources.working_set}
-
     print_colored("\n=== Verificando dependências do Multi Chrome Tester ===\n", "blue")
 
     for module_name, package_name in dependencies:
         try:
+            # Tratamento especial para tkinter
             if module_name == "tkinter":
-                # Tkinter é um caso especial
-                importlib.import_module(module_name)
-                print_colored(f"✓ {module_name} já está instalado.", "green")
+                try:
+                    importlib.import_module(module_name)
+                    print_colored(f"✓ {module_name} já está instalado.", "green")
+                except ImportError:
+                    print_colored(f"× {module_name} não está instalado. Ele vem com a instalação padrão do Python.", "red")
+                    print_colored("  Talvez você precise reinstalar o Python ou instalar o pacote 'tk' pelo gerenciador de pacotes do seu sistema.", "yellow")
+                    all_installed = False
             else:
                 # Verificar se o pacote está instalado
-                if package_name.lower() in installed_packages:
-                    print_colored(f"✓ {package_name} já está instalado (versão {installed_packages[package_name.lower()]}).", "green")
+                if is_package_installed(module_name):
+                    version = get_package_version(module_name)
+                    print_colored(f"✓ {package_name} já está instalado (versão {version}).", "green")
                 else:
                     success = install_package(package_name)
                     if not success:
                         all_installed = False
-        except ImportError:
+        except Exception as e:
+            print_colored(f"× Erro ao verificar {module_name}: {str(e)}", "red")
             success = install_package(package_name)
             if not success:
                 all_installed = False
