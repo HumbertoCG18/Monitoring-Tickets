@@ -10,6 +10,7 @@ from webdriver_manager.chrome import ChromeDriverManager
 import concurrent.futures
 import ctypes
 import sys
+from screeninfo import get_monitors
 
 # Temas de cores
 THEMES = {
@@ -39,34 +40,44 @@ THEMES = {
     }
 }
 
-# Função para detectar resolução de tela usando ctypes
+# Função para detectar monitores com identificação
 def get_screen_info():
-    user32 = ctypes.windll.user32
+    monitors_info = []
     taskbar_height = 40  # Altura estimada da taskbar
 
-    # Monitor principal
-    width_primary = user32.GetSystemMetrics(0)
-    height_primary = user32.GetSystemMetrics(1) - taskbar_height
+    # Usar screeninfo para obter informações dos monitores
+    screen_monitors = get_monitors()
 
-    # Detectar monitor secundário se existir
-    width_virtual = user32.GetSystemMetrics(78)
-    height_virtual = user32.GetSystemMetrics(79)
+    for i, monitor in enumerate(screen_monitors):
+        # Definir o primeiro monitor como primário (ou usar propriedade is_primary se disponível)
+        is_primary = getattr(monitor, 'is_primary', i == 0)
 
-    monitors = [
-        {'width': width_primary, 'height': height_primary, 'x_offset': 0, 'y_offset': 0, 'is_primary': True}
-    ]
+        # Extrair o identificador do monitor
+        # Screeninfo não fornece os nomes DISPLAY1, DISPLAY2, então usamos números sequenciais
+        monitor_id = str(i + 1)
 
-    # Se o tamanho virtual for maior, provavelmente há um segundo monitor
-    if width_virtual > width_primary:
-        monitors.append({
-            'width': width_virtual - width_primary,
-            'height': height_primary,
-            'x_offset': width_primary,
-            'y_offset': 0,
-            'is_primary': False
+        # Detectar orientação
+        if monitor.width > monitor.height:
+            default_orientation = "Paisagem"
+        else:
+            default_orientation = "Retrato"
+
+        # Adicionar informações do monitor à lista
+        monitors_info.append({
+            'width': monitor.width,
+            'height': monitor.height - taskbar_height if is_primary else monitor.height,
+            'x_offset': monitor.x,
+            'y_offset': monitor.y,
+            'is_primary': is_primary,
+            'id': monitor_id,
+            'default_orientation': default_orientation,
+            'orientation': default_orientation  # Orientação atual (pode ser modificada pelo usuário)
         })
 
-    return monitors
+    # Ordenar para que o monitor principal seja o primeiro
+    monitors_info.sort(key=lambda x: not x['is_primary'])
+
+    return monitors_info
 
 # Variáveis globais
 drivers = []  # Lista de drivers
@@ -74,6 +85,7 @@ driver_urls = {}  # Dicionário para armazenar URLs atuais de cada driver
 stop_monitor = False
 closing_in_progress = False
 current_theme = 'light'
+monitor_orientations = {}  # Armazenar orientações selecionadas
 
 def open_session(url, position, incognito, service=None):
     chrome_options = Options()
@@ -118,8 +130,19 @@ def calculate_positions(num_sessions, auto_arrange):
     if not auto_arrange:
         return [(800, 600, 0, 0)] * num_sessions
 
-    # Detectar monitores
+    # Detectar monitores e aplicar orientações selecionadas pelo usuário
     monitors = get_screen_info()
+
+    # Aplicar orientações selecionadas pelo usuário
+    for i, monitor in enumerate(monitors):
+        monitor_id = monitor['id']
+        if monitor_id in monitor_orientations:
+            monitors[i]['orientation'] = monitor_orientations[monitor_id]
+
+            # Ajustar dimensões se a orientação for diferente da padrão
+            if monitor['orientation'] != monitor['default_orientation']:
+                monitors[i]['width'], monitors[i]['height'] = monitors[i]['height'], monitors[i]['width']
+
     monitor_principal = monitors[0]
     monitor_secundario = monitors[1] if len(monitors) > 1 else None
 
@@ -157,8 +180,14 @@ def calculate_positions(num_sessions, auto_arrange):
 
         # Restante no monitor secundário
         remaining = num_sessions - 9
-        rows_s = math.ceil(math.sqrt(remaining))
-        cols_s = math.ceil(remaining / rows_s)
+
+        # Ajustar a grade com base na orientação do monitor secundário
+        if monitor_secundario['orientation'] == "Retrato":
+            rows_s = max(2, math.ceil(math.sqrt(remaining) * 2))
+            cols_s = math.ceil(remaining / rows_s)
+        else:
+            rows_s = math.ceil(math.sqrt(remaining))
+            cols_s = math.ceil(remaining / rows_s)
 
         width = (monitor_secundario['width'] - (cols_s+1)*margin) // cols_s
         height = (monitor_secundario['height'] - (rows_s+1)*margin) // rows_s
@@ -332,44 +361,108 @@ def draw_grid(canvas, num_sessions, width, height, auto_arrange):
                          fill=theme['fg'], justify=tk.CENTER)
         return
 
-    # Detectar monitores para a prévia
+    # Detectar monitores para a prévia e aplicar orientações selecionadas
     monitors = get_screen_info()
 
-    # Calcular escala para visualização
-    total_width = max([m['x_offset'] + m['width'] for m in monitors])
-    total_height = max([m['y_offset'] + m['height'] for m in monitors])
-
-    scale_x = width / total_width
-    scale_y = (height - 30) / total_height
-    scale = min(scale_x, scale_y)
-
-    # Desenhar monitores
+    # Aplicar orientações selecionadas pelo usuário
     for i, monitor in enumerate(monitors):
-        mon_x = monitor['x_offset'] * scale
-        mon_y = 30 + monitor['y_offset'] * scale
+        monitor_id = monitor['id']
+        if monitor_id in monitor_orientations:
+            monitors[i]['orientation'] = monitor_orientations[monitor_id]
+
+            # Ajustar dimensões se a orientação for diferente da padrão
+            if monitor['orientation'] != monitor['default_orientation']:
+                monitors[i]['width'], monitors[i]['height'] = monitors[i]['height'], monitors[i]['width']
+
+    # Se temos múltiplos monitores, garantir que renderizamos todos
+    if len(monitors) > 1:
+        # Determinar dimensões totais considerando todos os monitores
+        min_x = min([m['x_offset'] for m in monitors])
+        min_y = min([m['y_offset'] for m in monitors])
+        max_x = max([m['x_offset'] + m['width'] for m in monitors])
+        max_y = max([m['y_offset'] + m['height'] for m in monitors])
+
+        total_width = max_x - min_x
+        total_height = max_y - min_y
+
+        # Calcular escala para visualização
+        scale_x = width / total_width
+        scale_y = (height - 30) / total_height
+        scale = min(scale_x, scale_y) * 0.9  # Ligeira redução para garantir espaço
+
+        # Calcular deslocamento para centralizar
+        offset_x = (width - (total_width * scale)) / 2
+        offset_y = 30  # Espaço para os rótulos dos monitores
+
+        # Desenhar cada monitor
+        for i, monitor in enumerate(monitors):
+            # Ajustar coordenadas relativas ao canto superior esquerdo
+            mon_x = offset_x + (monitor['x_offset'] - min_x) * scale
+            mon_y = offset_y + (monitor['y_offset'] - min_y) * scale
+            mon_w = monitor['width'] * scale
+            mon_h = monitor['height'] * scale
+
+            # Desenhar contorno do monitor
+            canvas.create_rectangle(mon_x, mon_y, mon_x + mon_w, mon_y + mon_h,
+                                outline=theme['monitor_outline'], fill=theme['monitor_fill'])
+
+            # Rótulo do monitor
+            label = f"Monitor {monitor['id']}" + (" (Principal)" if monitor['is_primary'] else "")
+            canvas.create_text(mon_x + mon_w/2, mon_y - 15, text=label, fill=theme['fg'])
+
+        # Desenhar posições das janelas
+        positions = calculate_positions(num_sessions, auto_arrange)
+
+        for i, (w, h, x, y) in enumerate(positions):
+            # Ajustar coordenadas conforme a mesma escala dos monitores
+            win_x = offset_x + (x - min_x) * scale
+            win_y = offset_y + (y - min_y) * scale
+            win_w = w * scale
+            win_h = h * scale
+
+            canvas.create_rectangle(win_x, win_y, win_x + win_w, win_y + win_h,
+                                outline=theme['grid_outline'], fill=theme['grid_fill'])
+            canvas.create_text(win_x + win_w/2, win_y + win_h/2, text=f"{i+1}", fill=theme['fg'])
+
+        # Adicionar legenda explicativa quando há mais de 9 sessões
+        if num_sessions > 9:
+            canvas.create_text(width/2, height - 15,
+                               text=f"Sessões 1-9 no Monitor Principal, 10-{num_sessions} no Monitor Secundário",
+                               fill=theme['fg'], font=('Helvetica', 8))
+    else:
+        # Código original para um único monitor
+        # ...resto do código para um monitor...
+        total_width = monitors[0]['width']
+        total_height = monitors[0]['height']
+
+        scale_x = width / total_width
+        scale_y = (height - 30) / total_height
+        scale = min(scale_x, scale_y)
+
+        # Desenhar monitor
+        monitor = monitors[0]
+        mon_x = (width - monitor['width'] * scale) / 2
+        mon_y = 30
         mon_w = monitor['width'] * scale
         mon_h = monitor['height'] * scale
 
-        # Desenhar contorno do monitor
         canvas.create_rectangle(mon_x, mon_y, mon_x + mon_w, mon_y + mon_h,
                               outline=theme['monitor_outline'], fill=theme['monitor_fill'])
+        canvas.create_text(mon_x + mon_w/2, mon_y - 15, text=f"Monitor {monitor['id']} (Principal)",
+                          fill=theme['fg'])
 
-        # Rótulo do monitor
-        label = f"Monitor {i+1}" + (" (Principal)" if monitor['is_primary'] else "")
-        canvas.create_text(mon_x + mon_w/2, mon_y - 15, text=label, fill=theme['fg'])
+        # Desenhar posições das janelas
+        positions = calculate_positions(num_sessions, auto_arrange)
+        for i, (w, h, x, y) in enumerate(positions):
+            # Ajustar para centralizar no canvas
+            win_x = mon_x + (x - monitor['x_offset']) * scale
+            win_y = mon_y + (y - monitor['y_offset']) * scale
+            win_w = w * scale
+            win_h = h * scale
 
-    # Desenhar posições das janelas
-    positions = calculate_positions(num_sessions, auto_arrange)
-
-    for i, (w, h, x, y) in enumerate(positions):
-        win_x = x * scale
-        win_y = 30 + y * scale
-        win_w = w * scale
-        win_h = h * scale
-
-        canvas.create_rectangle(win_x, win_y, win_x + win_w, win_y + win_h,
-                              outline=theme['grid_outline'], fill=theme['grid_fill'])
-        canvas.create_text(win_x + win_w/2, win_y + win_h/2, text=f"{i+1}", fill=theme['fg'])
+            canvas.create_rectangle(win_x, win_y, win_x + win_w, win_y + win_h,
+                                 outline=theme['grid_outline'], fill=theme['grid_fill'])
+            canvas.create_text(win_x + win_w/2, win_y + win_h/2, text=f"{i+1}", fill=theme['fg'])
 
 def update_preview(event=None):
     try:
@@ -378,6 +471,72 @@ def update_preview(event=None):
         draw_grid(preview_canvas, num_sessions, 350, 250, auto_arrange)
     except ValueError:
         draw_grid(preview_canvas, 0, 350, 250, auto_arrange_var.get())
+
+def update_monitor_orientation(monitor_id, orientation):
+    """Atualiza a orientação de um monitor específico"""
+    global monitor_orientations
+    monitor_orientations[monitor_id] = orientation
+    update_preview()
+
+def refresh_monitor_settings():
+    """Atualiza as configurações dos monitores na interface"""
+    # Limpar frame de configurações
+    for widget in monitor_settings_frame.winfo_children():
+        widget.destroy()
+
+    # Obter informações dos monitores
+    monitors = get_screen_info()
+
+    # Se tivermos mais de um monitor, mostrar o frame de configurações
+    if len(monitors) > 1:
+        monitor_settings_frame.pack(fill=tk.X, pady=10)
+
+        # Título
+        ttk.Label(
+            monitor_settings_frame,
+            text="Configuração de Monitores:",
+            font=('Helvetica', 10, 'bold')
+        ).pack(anchor=tk.W, pady=(0, 5))
+
+        # Para cada monitor, criar uma linha com seu ID e combobox de orientação
+        for monitor in monitors:
+            monitor_frame = ttk.Frame(monitor_settings_frame)
+            monitor_frame.pack(fill=tk.X, pady=2)
+
+            # Label com ID do monitor
+            ttk.Label(
+                monitor_frame,
+                text=f"Monitor {monitor['id']}" + (" (Principal)" if monitor['is_primary'] else "")
+            ).pack(side=tk.LEFT, padx=(0, 10))
+
+            # Combobox para orientação
+            orientation_combo = ttk.Combobox(
+                monitor_frame,
+                values=["Paisagem", "Retrato"],
+                width=10,
+                state="readonly"
+            )
+            orientation_combo.pack(side=tk.LEFT)
+
+            # Definir valor padrão
+            current_orientation = monitor_orientations.get(
+                monitor['id'],
+                monitor['default_orientation']
+            )
+            orientation_combo.set(current_orientation)
+
+            # Criar uma função de callback que captura o ID do monitor
+            def make_callback(monitor_id):
+                return lambda event: update_monitor_orientation(monitor_id, event.widget.get())
+
+            # Associar callback
+            orientation_combo.bind("<<ComboboxSelected>>", make_callback(monitor['id']))
+    else:
+        # Se tiver apenas um monitor, não mostrar as configurações
+        monitor_settings_frame.pack_forget()
+
+    # Atualizar a prévia
+    update_preview()
 
 def start():
     try:
@@ -429,6 +588,12 @@ def apply_theme():
     style.configure('TCheckbutton', background=theme['bg'], foreground=theme['fg'])
     style.configure('TButton', background=theme['button'], foreground='white')
     style.map('TButton', background=[('active', theme['button_hover'])])
+
+    # Configurar estilo para comboboxes
+    style.configure('TCombobox', fieldbackground=theme['bg'], background=theme['bg'])
+    style.map('TCombobox', fieldbackground=[('readonly', theme['bg'])])
+    style.map('TCombobox', selectbackground=[('readonly', theme['accent'])])
+    style.map('TCombobox', selectforeground=[('readonly', 'white')])
 
     # Atualizar canvas
     preview_canvas.configure(bg=theme['canvas_bg'])
@@ -511,7 +676,7 @@ def perform_safe_close():
 
 # Configuração da interface
 root = tk.Tk()
-root.geometry('500x650')
+root.geometry('500x700')  # Aumentado para acomodar as configurações de monitor
 root.title('Multi Chrome Tester')
 root.protocol("WM_DELETE_WINDOW", perform_safe_close)
 
@@ -573,6 +738,14 @@ ttk.Checkbutton(
 theme_button = ttk.Button(options_frame, text="Tema Escuro", command=toggle_theme)
 theme_button.pack(anchor=tk.W, pady=5)
 
+# Botão para atualizar as configurações de monitor
+refresh_button = ttk.Button(options_frame, text="Atualizar Monitores", command=refresh_monitor_settings)
+refresh_button.pack(anchor=tk.W, pady=5)
+
+# Frame para configurações de monitor
+monitor_settings_frame = ttk.Frame(main_frame)
+# Será exibido apenas se houver mais de um monitor
+
 # Prévia
 preview_frame = ttk.Frame(main_frame)
 preview_frame.pack(fill=tk.BOTH, expand=True, pady=10)
@@ -600,6 +773,9 @@ status_label.pack(anchor=tk.W)
 
 # Aplicar tema inicial
 apply_theme()
+
+# Inicializar as configurações de monitor
+refresh_monitor_settings()
 
 # Inicializar a prévia
 update_preview()
