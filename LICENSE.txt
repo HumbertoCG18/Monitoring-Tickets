@@ -1,0 +1,18 @@
+Multi Chrome Tester
+==================
+
+Licença de Uso:
+
+Este software é fornecido "como está", sem garantias de qualquer tipo, expressas ou implícitas.
+O autor não se responsabiliza por danos decorrentes do uso deste software.
+
+O usuário é livre para:
+1. Utilizar o software para qualquer finalidade
+2. Distribuir o software
+3. Modificar o software
+
+Limitações:
+- Não é permitido vender o software
+- Esta licença e os avisos de direitos autorais devem ser mantidos
+
+Copyright (c) 2023
