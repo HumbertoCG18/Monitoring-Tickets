@@ -4,7 +4,7 @@
 !include "LogicLib.nsh"
 
 ; Definições básicas
-!define APPNAME "Multi Chrome Tester"
+!define APPNAME "MultiChromeTester"
 !define VERSION "1.0"
 !define PUBLISHER "Seu Nome"
 
@@ -45,13 +45,13 @@ Function .onInit
   System::Call 'kernel32::CreateMutexA(i 0, i 0, t "MultiChromeTesterInstaller") i .r1 ?e'
   Pop $R0
   ${If} $R0 != 0
-    MessageBox MB_OK|MB_ICONEXCLAMATION "O instalador já está sendo executado."
+    MessageBox MB_OK|MB_ICONEXCLAMATION "O instalador ja esta sendo executado."
     Abort
   ${EndIf}
 FunctionEnd
 
 ; Instalar arquivos principais
-Section "Multi Chrome Tester (obrigatório)" SecMain
+Section "Multi Chrome Tester (obrigatorio)" SecMain
   SectionIn RO ; Seção obrigatória (RO = Read-Only)
   
   SetOutPath "$INSTDIR"
@@ -78,11 +78,11 @@ Section "Multi Chrome Tester (obrigatório)" SecMain
 SectionEnd
 
 ; Instalar dependências (opcional)
-Section "Dependências Python" SecDeps
+Section "Dependencias Python" SecDeps
   SetOutPath "$INSTDIR"
   File /nonfatal "install_dependencies.py"
   
-  DetailPrint "Instalando dependências Python..."
+  DetailPrint "Instalando dependencias Python..."
   nsExec::ExecToStack 'python "$INSTDIR\install_dependencies.py"'
   Pop $0 ; Código de retorno
   Pop $1 ; Saída do comando
@@ -104,10 +104,10 @@ SectionEnd
 
 ; Descrições das seções
 !insertmacro MUI_FUNCTION_DESCRIPTION_BEGIN
-  !insertmacro MUI_DESCRIPTION_TEXT ${SecMain} "Arquivos principais do programa (obrigatório)."
-  !insertmacro MUI_DESCRIPTION_TEXT ${SecDeps} "Instala automaticamente todas as dependências Python necessárias."
-  !insertmacro MUI_DESCRIPTION_TEXT ${SecShortcuts} "Cria atalhos no menu Iniciar e na área de trabalho."
-  !insertmacro MUI_DESCRIPTION_TEXT ${SecStartup} "Inicia o aplicativo automaticamente quando o Windows é iniciado."
+  !insertmacro MUI_DESCRIPTION_TEXT ${SecMain} "Arquivos principais do programa (obrigatorio)."
+  !insertmacro MUI_DESCRIPTION_TEXT ${SecDeps} "Instala automaticamente todas as dependencias Python necessarias."
+  !insertmacro MUI_DESCRIPTION_TEXT ${SecShortcuts} "Cria atalhos no menu Iniciar e na area de trabalho."
+  !insertmacro MUI_DESCRIPTION_TEXT ${SecStartup} "Startup on Windows."
 !insertmacro MUI_FUNCTION_DESCRIPTION_END
 
 ; Desinstalação
